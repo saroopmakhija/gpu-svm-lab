@@ -1,0 +1,47 @@
+#!/usr/bin/env bpftrace
+/*
+ * svmd-trace.bt - measure the driver with BPF, from its tracepoints.
+ *
+ * Run in the guest while a workload runs, Ctrl-C (or timeout) to print:
+ *   timeout 20 bpftrace /lab/scripts/svmd-trace.bt & /lab/tests/svm big
+ *
+ * What it answers:
+ *   - how long does it take to resolve a device page fault?
+ *   - how many faults abort a job, and why?
+ *   - how long does an invalidation (entries + TLB flush + wait) take?
+ *   - how much data migrates, and how fast?
+ */
+
+tracepoint:svmd:svmd_fault
+{
+	@faults_by_reason[args->reason == 1 ? "not-present" :
+			  args->reason == 2 ? "read-only" : "bad-entry"] = count();
+}
+
+tracepoint:svmd:svmd_fault_done
+{
+	if (args->ret == 0) {
+		@fault_resolve_us = hist(args->ns / 1000);
+	} else {
+		@fault_aborted[args->ret] = count();
+	}
+}
+
+tracepoint:svmd:svmd_invalidate
+{
+	@invalidate_us = hist(args->ns / 1000);
+	@invalidations = count();
+}
+
+tracepoint:svmd:svmd_migrate
+{
+	@migrated_pages[args->to_vram ? "to-vram" : "to-ram"] = sum(args->npages);
+	/* MiB/s = pages * 4096 / ns * 1e9 / 2^20 */
+	@migrate_mib_s[args->to_vram ? "to-vram" : "to-ram"] =
+		hist(args->npages * 4096 * 1000 / (args->ns + 1));
+}
+
+END
+{
+	printf("\n(@migrate_mib_s buckets are MB/s)\n");
+}
